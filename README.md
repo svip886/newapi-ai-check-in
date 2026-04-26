@@ -19,6 +19,7 @@ Affs:
 - ✅ 多种机器人通知（可选）
 - ✅ linux.do 登录认证
 - ✅ github 登录认证 (with OTP)
+- ✅ 站点账号密码登录认证
 - ✅ Cloudflare bypass
 
 ## 使用方法
@@ -85,10 +86,10 @@ Affs:
 
 ### 3 多账号配置格式
 > 如果未提供 `name` 字段，会使用 `{provider.name} 1`、`{provider.name} 2` 等默认名称。  
-> 配置中 `cookies`、`github`、`linux.do` 必须至少配置 1 个。  
+> 配置中 `cookies`、`github`、`linux.do`、`site` 必须至少配置 1 个。  
 > 使用 `cookies` 设置时，`api_user` 字段必填。  
 
-#### 3.1 OAuth 配置支持三种格式
+#### 3.1 登录配置格式
 
 `github` 和 `linux.do` 字段支持以下三种配置格式：
 
@@ -111,6 +112,21 @@ Affs:
 ]}
 ```
 
+`site` 字段支持以下两种配置格式：
+
+**1. dict 类型 - 单个站点账号**
+```json
+{"provider": "anyrouter", "site": {"username": "站点用户名", "password": "站点密码"}}
+```
+
+**2. array 类型 - 多个站点账号**
+```json
+{"provider": "anyrouter", "site": [
+  {"username": "用户名1", "password": "密码1"},
+  {"username": "用户名2", "password": "密码2", "mode": "browser"}
+]}
+```
+
 #### 3.2 完整示例
 
 ```json
@@ -128,6 +144,10 @@ Affs:
       "linux.do": {
         "username": "myuser",
         "password": "mypass"
+      },
+      "site": {
+        "username": "site-user",
+        "password": "site-pass"
       },
       // --- 额外的配置说明 ---
       // 当前账号使用代理
@@ -175,6 +195,19 @@ Affs:
   - `true`：使用 `GITHUB_ACCOUNTS` 中的全局账号
   - `{"username": "xxx", "password": "xxx"}`：单个账号
   - `[{"username": "xxx", "password": "xxx"}, ...]`：多个账号
+- `site`(可选)：用于站点账号密码登录，支持两种格式：
+  - `{"username": "xxx", "password": "xxx"}`：单个账号
+  - `[{"username": "xxx", "password": "xxx"}, ...]`：多个账号
+  - `mode` 可选值：`auto`、`api`、`browser`，默认 `auto`
+
+#### 3.3.1 `site` 登录说明
+
+- `mode=api`：直接请求站点登录接口：`/api/user/login?turnstile=`。
+- `mode=browser`：使用内置浏览器打开登录页，切换到“邮箱或用户名登录”，填写账号密码并提交。
+- `mode=auto`：先尝试 `api` 登录，失败后自动回退到 `browser` 登录。
+- 登录成功后会自动读取响应或浏览器中的 cookie，并使用响应中的 `data.id` 或页面本地存储/用户信息接口中的用户 ID 作为 `api_user`。
+- 因此使用 `site` 登录时，不需要手动填写 `cookies.session` 和 `api_user`。
+- 如果目标站点启用了额外验证码、前端校验或防护，优先使用 `mode=auto` 或 `mode=browser`。
 
 #### 3.4 供应商配置：
 

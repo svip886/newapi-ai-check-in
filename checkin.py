@@ -14,11 +14,11 @@ from urllib.parse import urlparse, urlencode
 from curl_cffi import requests as curl_requests
 from camoufox.async_api import AsyncCamoufox
 from utils.config import AccountConfig, ProviderConfig
-from utils.browser_utils import parse_cookies, get_random_user_agent, take_screenshot, aliyun_captcha_check
+from utils.browser_utils import parse_cookies, filter_cookies, get_random_user_agent, take_screenshot, aliyun_captcha_check
 from utils.get_cf_clearance import get_cf_clearance
 from utils.http_utils import proxy_resolve, response_resolve
 from utils.topup import topup
-from utils.get_headers import get_curl_cffi_impersonate
+from utils.get_headers import get_browser_headers, get_curl_cffi_impersonate, print_browser_headers
 from utils.mask_utils import mask_username
 
 class CheckIn:
@@ -1355,6 +1355,372 @@ class CheckIn:
         finally:
             session.close()
 
+    async def check_in_with_site(
+        self,
+        username: str,
+        password: str,
+        bypass_cookies: dict,
+        common_headers: dict,
+        mode: str = "auto",
+    ) -> tuple[bool, dict]:
+        """使用站点账号密码执行签到操作"""
+        print(
+            f"ℹ️ {self.account_name}: Executing check-in with site account, mode={mode} (using proxy: {'true' if self.http_proxy_config else 'false'})"
+        )
+
+        if mode == "browser":
+            return await self.check_in_with_site_browser(username, password, bypass_cookies, common_headers)
+
+        success, result = await self.check_in_with_site_api(username, password, bypass_cookies, common_headers)
+        if success or mode == "api":
+            return success, result
+
+        print(f"⚠️ {self.account_name}: Site API login failed, falling back to browser login")
+        return await self.check_in_with_site_browser(username, password, bypass_cookies, common_headers)
+
+    async def check_in_with_site_api(
+        self,
+        username: str,
+        password: str,
+        bypass_cookies: dict,
+        common_headers: dict,
+    ) -> tuple[bool, dict]:
+        """使用站点登录接口执行签到操作"""
+        print(
+            f"ℹ️ {self.account_name}: Executing site API login (using proxy: {'true' if self.http_proxy_config else 'false'})"
+        )
+
+        user_agent = common_headers.get("User-Agent", "")
+        impersonate = get_curl_cffi_impersonate(user_agent)
+
+        session = curl_requests.Session(impersonate=impersonate, proxy=self.http_proxy_config, timeout=30)
+        if impersonate:
+            print(f"ℹ️ {self.account_name}: Using curl_cffi Session with impersonate={impersonate}")
+
+        try:
+            session.cookies.update(bypass_cookies)
+
+            headers = common_headers.copy()
+            headers["Content-Type"] = "application/json"
+            headers["X-Requested-With"] = "XMLHttpRequest"
+            headers[self.provider_config.api_user_key] = "-1"
+            headers["Referer"] = self.provider_config.get_login_url()
+            headers["Origin"] = self.provider_config.origin
+
+            login_url = f"{self.provider_config.origin}/api/user/login?turnstile="
+            payload = {"username": username, "password": password}
+            response = session.post(login_url, headers=headers, json=payload, timeout=30)
+
+            if response.status_code != 200:
+                print(f"❌ {self.account_name}: Site login failed - HTTP {response.status_code}")
+                return False, {"error": f"Site login HTTP {response.status_code}"}
+
+            json_data = response_resolve(response, "site_login", self.account_name)
+            if json_data is None:
+                return False, {"error": "Site login returned invalid response"}
+
+            if not json_data.get("success"):
+                error_msg = json_data.get("message", "Site login failed")
+                print(f"❌ {self.account_name}: Site login failed - {error_msg}")
+                return False, {"error": error_msg}
+
+            user_data = json_data.get("data", {})
+            api_user = user_data.get("id")
+            if api_user is None:
+                print(f"❌ {self.account_name}: No user ID in site login response")
+                return False, {"error": "No user ID in site login response"}
+
+            user_cookies = {}
+            for cookie in session.cookies.jar:
+                user_cookies[cookie.name] = cookie.value
+
+            print(f"ℹ️ {self.account_name}: Extracted {len(user_cookies)} site login cookies: {list(user_cookies.keys())}")
+
+            merged_cookies = {**bypass_cookies, **user_cookies}
+            return await self.check_in_with_cookies(merged_cookies, common_headers, api_user, impersonate)
+
+        except Exception as e:
+            print(f"❌ {self.account_name}: Error occurred during site login process - {e}")
+            return False, {"error": "Site login process error"}
+        finally:
+            session.close()
+
+    async def _click_site_password_login_switch(self, page) -> bool:
+        """切换到站点账号密码登录表单，尽量使用稳定选择器和文本匹配。"""
+        selectors = [
+            'button:has-text("使用 邮箱或用户名 登录")',
+            'button:has-text("邮箱或用户名")',
+            'button:has-text("用户名")',
+            'button.semi-button:nth-child(4)',
+        ]
+
+        for selector in selectors:
+            try:
+                element = await page.query_selector(selector)
+                if element:
+                    print(f"ℹ️ {self.account_name}: Clicking site password-login switch by selector: {selector}")
+                    await element.click()
+                    await page.wait_for_timeout(1000)
+                    return True
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed password-login switch selector {selector}: {e}")
+
+        try:
+            clicked = await page.evaluate(
+                """() => {
+                    const candidates = Array.from(document.querySelectorAll('button'));
+                    const button = candidates.find((item) => {
+                        const text = (item.innerText || item.textContent || '').replace(/\s+/g, ' ').trim();
+                        return text.includes('邮箱或用户名') || text.includes('用户名') || text.includes('密码登录');
+                    });
+                    if (button) {
+                        button.click();
+                        return true;
+                    }
+                    return false;
+                }"""
+            )
+            if clicked:
+                print(f"ℹ️ {self.account_name}: Clicking site password-login switch by text scan")
+                await page.wait_for_timeout(1000)
+                return True
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed password-login switch text scan: {e}")
+
+        return False
+
+    async def _fill_site_login_form(self, page, username: str, password: str) -> bool:
+        """填写站点登录表单，使用 fill + 事件触发，兼容前端校验。"""
+        username_selectors = [
+            '#username',
+            'input[name="username"]',
+            'input[placeholder*="用户名"]',
+            'input[placeholder*="邮箱"]',
+            'input[type="text"]',
+        ]
+        password_selectors = [
+            '#password',
+            'input[name="password"]',
+            'input[type="password"]',
+        ]
+
+        username_selector = None
+        for selector in username_selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=3000)
+                username_selector = selector
+                break
+            except Exception:
+                continue
+
+        password_selector = None
+        for selector in password_selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=3000)
+                password_selector = selector
+                break
+            except Exception:
+                continue
+
+        if not username_selector or not password_selector:
+            print(f"❌ {self.account_name}: Site login form inputs not found")
+            return False
+
+        await page.fill(username_selector, username)
+        await page.dispatch_event(username_selector, "input")
+        await page.dispatch_event(username_selector, "change")
+        await page.wait_for_timeout(500)
+
+        await page.fill(password_selector, password)
+        await page.dispatch_event(password_selector, "input")
+        await page.dispatch_event(password_selector, "change")
+        await page.wait_for_timeout(500)
+        return True
+
+    async def _submit_site_login_form(self, page) -> bool:
+        """提交站点登录表单，优先使用表单内 submit 按钮。"""
+        selectors = [
+            'form button[type="submit"]',
+            'button[type="submit"]:has-text("继续")',
+            'button.semi-button-primary:has-text("继续")',
+            'button.semi-button-primary',
+        ]
+
+        for selector in selectors:
+            try:
+                element = await page.query_selector(selector)
+                if element:
+                    print(f"ℹ️ {self.account_name}: Submitting site login form by selector: {selector}")
+                    await element.click()
+                    return True
+            except Exception as e:
+                print(f"⚠️ {self.account_name}: Failed submit selector {selector}: {e}")
+
+        try:
+            submitted = await page.evaluate(
+                """() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const button = buttons.find((item) => {
+                        const text = (item.innerText || item.textContent || '').replace(/\s+/g, ' ').trim();
+                        return text.includes('继续') || text.includes('登录') || text.includes('登入');
+                    });
+                    if (button) {
+                        button.click();
+                        return true;
+                    }
+                    const form = document.querySelector('form');
+                    if (form) {
+                        form.requestSubmit ? form.requestSubmit() : form.submit();
+                        return true;
+                    }
+                    return false;
+                }"""
+            )
+            if submitted:
+                print(f"ℹ️ {self.account_name}: Submitting site login form by text/form scan")
+                return True
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Failed submit text/form scan: {e}")
+
+        return False
+
+    async def _read_site_api_user_from_browser(self, page, cookies: dict, common_headers: dict) -> str | int | None:
+        """从浏览器 localStorage 或 /api/user/self 获取用户 ID。"""
+        try:
+            user_data = await page.evaluate("() => localStorage.getItem('user')")
+            if user_data:
+                user_obj = json.loads(user_data)
+                api_user = user_obj.get("id")
+                if api_user is not None:
+                    print(f"✅ {self.account_name}: Got api user from localStorage: {api_user}")
+                    return api_user
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Error reading user from localStorage: {e}")
+
+        session = None
+        try:
+            user_agent = common_headers.get("User-Agent", "")
+            impersonate = get_curl_cffi_impersonate(user_agent)
+            session = curl_requests.Session(impersonate=impersonate, proxy=self.http_proxy_config, timeout=30)
+            session.cookies.update(cookies)
+
+            headers = common_headers.copy()
+            headers[self.provider_config.api_user_key] = "-1"
+            headers["Referer"] = self.provider_config.origin
+            headers["Origin"] = self.provider_config.origin
+
+            response = session.get(self.provider_config.get_user_info_url(), headers=headers, timeout=30)
+            if response.status_code == 200:
+                json_data = response_resolve(response, "site_user_self", self.account_name)
+                if json_data and json_data.get("success"):
+                    user_data = json_data.get("data", {})
+                    api_user = user_data.get("id")
+                    if api_user is not None:
+                        print(f"✅ {self.account_name}: Got api user from user-info API: {api_user}")
+                        return api_user
+            print(f"⚠️ {self.account_name}: Unable to get api user from user-info API, HTTP {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ {self.account_name}: Error getting api user from user-info API: {e}")
+        finally:
+            if session:
+                session.close()
+
+        return None
+
+    async def check_in_with_site_browser(
+        self,
+        username: str,
+        password: str,
+        bypass_cookies: dict,
+        common_headers: dict,
+    ) -> tuple[bool, dict]:
+        """使用浏览器打开登录页并完成站点账号密码登录。"""
+        print(
+            f"ℹ️ {self.account_name}: Executing site browser login (using proxy: {'true' if self.camoufox_proxy_config else 'false'})"
+        )
+
+        async with AsyncCamoufox(
+            headless=False,
+            humanize=True,
+            locale="en-US",
+            geoip=True if self.camoufox_proxy_config else False,
+            proxy=self.camoufox_proxy_config,
+            os="macos",
+            config={
+                "forceScopeAccess": True,
+            },
+        ) as browser:
+            context = await browser.new_context()
+            if bypass_cookies:
+                parsed_origin = urlparse(self.provider_config.origin)
+                await context.add_cookies([
+                    {
+                        "name": name,
+                        "value": value,
+                        "domain": parsed_origin.hostname,
+                        "path": "/",
+                        "secure": parsed_origin.scheme == "https",
+                    }
+                    for name, value in bypass_cookies.items()
+                ])
+                print(f"ℹ️ {self.account_name}: Set {len(bypass_cookies)} bypass cookies before browser login")
+
+            page = await context.new_page()
+            try:
+                await page.goto(self.provider_config.get_login_url(), wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    await page.wait_for_timeout(3000)
+
+                if self.provider_config.aliyun_captcha:
+                    await aliyun_captcha_check(page, self.account_name)
+
+                await self._click_site_password_login_switch(page)
+
+                if not await self._fill_site_login_form(page, username, password):
+                    await take_screenshot(page, "site_login_form_not_found", self.account_name)
+                    return False, {"error": "Site browser login form not found"}
+
+                current_url = page.url
+                if not await self._submit_site_login_form(page):
+                    await take_screenshot(page, "site_login_submit_not_found", self.account_name)
+                    return False, {"error": "Site browser login submit not found"}
+
+                try:
+                    await page.wait_for_function('localStorage.getItem("user") !== null', timeout=15000)
+                except Exception:
+                    try:
+                        await page.wait_for_url(lambda url: url != current_url, timeout=15000)
+                    except Exception:
+                        await page.wait_for_timeout(5000)
+
+                restore_cookies = await context.cookies()
+                user_cookies = filter_cookies(restore_cookies, self.provider_config.origin)
+                merged_cookies = {**bypass_cookies, **user_cookies}
+
+                api_user = await self._read_site_api_user_from_browser(page, merged_cookies, common_headers)
+                if api_user is None:
+                    await take_screenshot(page, "site_browser_login_no_user_id", self.account_name)
+                    return False, {"error": "Site browser login succeeded but no user ID found"}
+
+                browser_headers = await get_browser_headers(page)
+                updated_headers = common_headers.copy()
+                if browser_headers:
+                    print_browser_headers(self.account_name, browser_headers)
+                    updated_headers.update(browser_headers)
+
+                impersonate = get_curl_cffi_impersonate(updated_headers.get("User-Agent", ""))
+                return await self.check_in_with_cookies(merged_cookies, updated_headers, api_user, impersonate)
+
+            except Exception as e:
+                print(f"❌ {self.account_name}: Error occurred during site browser login process - {e}")
+                await take_screenshot(page, "site_browser_login_error", self.account_name)
+                return False, {"error": "Site browser login process error"}
+            finally:
+                await page.close()
+                await context.close()
+
     async def execute(self) -> list[tuple[str, bool, dict | None]]:
         """为单个账号执行签到操作，支持多种认证方式"""
         print(f"\n\n⏳ Starting to process {self.account_name}")
@@ -1447,6 +1813,7 @@ class CheckIn:
         cookies_data = self.account_config.cookies
         github_accounts = self.account_config.github  # 现在是 List[OAuthAccountConfig] 类型
         linuxdo_accounts = self.account_config.linux_do  # 现在是 List[OAuthAccountConfig] 类型
+        site_accounts = self.account_config.site
         results = []
 
         # 尝试 cookies 认证
@@ -1500,6 +1867,34 @@ class CheckIn:
                             results.append((account_label, False, user_info))
                 except Exception as e:
                     print(f"❌ {self.account_name}: GitHub authentication error ({mask_username(github_account.username)}): {e}")
+                    results.append((account_label, False, {"error": str(e)}))
+
+        if site_accounts:
+            for idx, site_account in enumerate(site_accounts):
+                account_label = f"site[{idx}]" if len(site_accounts) > 1 else "site"
+                print(f"\nℹ️ {self.account_name}: Trying site authentication ({mask_username(site_account.username)})")
+                try:
+                    username = site_account.username
+                    password = site_account.password
+                    if not username or not password:
+                        print(f"❌ {self.account_name}: Incomplete site account information")
+                        results.append((account_label, False, {"error": "Incomplete site account information"}))
+                    else:
+                        success, user_info = await self.check_in_with_site(
+                            username,
+                            password,
+                            bypass_cookies,
+                            common_headers,
+                            site_account.mode,
+                        )
+                        if success:
+                            print(f"✅ {self.account_name}: Site authentication successful ({mask_username(site_account.username)})")
+                            results.append((account_label, True, user_info))
+                        else:
+                            print(f"❌ {self.account_name}: Site authentication failed ({mask_username(site_account.username)})")
+                            results.append((account_label, False, user_info))
+                except Exception as e:
+                    print(f"❌ {self.account_name}: Site authentication error ({mask_username(site_account.username)}): {e}")
                     results.append((account_label, False, {"error": str(e)}))
 
         # 尝试 Linux.do 认证（支持多个账号）

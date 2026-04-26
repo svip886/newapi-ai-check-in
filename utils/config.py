@@ -211,6 +211,28 @@ class OAuthAccountConfig:
 
 
 @dataclass
+class SiteAccountConfig:
+    """站点账号密码配置"""
+
+    username: str
+    password: str
+    mode: Literal["auto", "api", "browser"] = "auto"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SiteAccountConfig":
+        """从字典创建 SiteAccountConfig"""
+        mode = data.get("mode", "auto")
+        if mode not in ("auto", "api", "browser"):
+            mode = "auto"
+
+        return cls(
+            username=data.get("username", ""),
+            password=data.get("password", ""),
+            mode=mode,
+        )
+
+
+@dataclass
 class AccountConfig:
     """账号配置"""
 
@@ -220,6 +242,7 @@ class AccountConfig:
     name: str | None = None
     linux_do: List["OAuthAccountConfig"] | None = None  # 改为列表类型
     github: List["OAuthAccountConfig"] | None = None  # 改为列表类型
+    site: List["SiteAccountConfig"] | None = None
     proxy: dict | None = None
     extra: dict = field(default_factory=dict)  # 存储额外的配置字段
 
@@ -229,6 +252,7 @@ class AccountConfig:
         data: dict,
         linux_do_accounts: List["OAuthAccountConfig"] | None = None,
         github_accounts: List["OAuthAccountConfig"] | None = None,
+        site_accounts: List["SiteAccountConfig"] | None = None,
     ) -> "AccountConfig":
         """从字典创建 AccountConfig
 
@@ -245,7 +269,7 @@ class AccountConfig:
         proxy = data.get("proxy")
 
         # 提取已知字段
-        known_keys = {"provider", "name", "cookies", "api_user", "linux.do", "github", "proxy"}
+        known_keys = {"provider", "name", "cookies", "api_user", "linux.do", "github", "site", "proxy"}
         # 收集额外的配置字段
         extra = {k: v for k, v in data.items() if k not in known_keys}
 
@@ -256,6 +280,7 @@ class AccountConfig:
             api_user=data.get("api_user", ""),
             linux_do=linux_do_accounts,
             github=github_accounts,
+            site=site_accounts,
             proxy=proxy,
             extra=extra,
         )
@@ -284,6 +309,53 @@ class AppConfig:
     linux_do_accounts: List["OAuthAccountConfig"] = field(default_factory=list)  # 全局 Linux.do 账号列表
     github_accounts: List["OAuthAccountConfig"] = field(default_factory=list)  # 全局 GitHub 账号列表
     global_proxy: Dict | None = None
+
+    @classmethod
+    def _parse_site_config(
+        cls,
+        config_value,
+        account_index: int,
+    ) -> List["SiteAccountConfig"] | None:
+        """解析站点账号密码配置，支持单个账号或多个账号"""
+        if isinstance(config_value, dict):
+            if "username" not in config_value or "password" not in config_value:
+                print(f"❌ Account {account_index + 1} site configuration must contain username and password")
+                return None
+
+            if not config_value["username"] or not config_value["password"]:
+                print(f"❌ Account {account_index + 1} site username and password cannot be empty")
+                return None
+
+            if config_value.get("mode", "auto") not in ("auto", "api", "browser"):
+                print(f"❌ Account {account_index + 1} site mode must be auto, api, or browser")
+                return None
+
+            return [SiteAccountConfig.from_dict(config_value)]
+
+        if isinstance(config_value, list):
+            accounts = []
+            for j, item in enumerate(config_value):
+                if not isinstance(item, dict):
+                    print(f"❌ Account {account_index + 1} site[{j}] must be a dictionary")
+                    return None
+
+                if "username" not in item or "password" not in item:
+                    print(f"❌ Account {account_index + 1} site[{j}] must contain username and password")
+                    return None
+
+                if not item["username"] or not item["password"]:
+                    print(f"❌ Account {account_index + 1} site[{j}] username and password cannot be empty")
+                    return None
+
+                if item.get("mode", "auto") not in ("auto", "api", "browser"):
+                    print(f"❌ Account {account_index + 1} site[{j}] mode must be auto, api, or browser")
+                    return None
+
+                accounts.append(SiteAccountConfig.from_dict(item))
+            return accounts
+
+        print(f"❌ Account {account_index + 1} site configuration must be dict or array")
+        return None
 
     @classmethod
     def load_from_env(
@@ -920,6 +992,7 @@ class AppConfig:
                 # 检查配置键是否存在
                 has_linux_do = "linux.do" in account
                 has_github = "github" in account
+                has_site = "site" in account
                 has_cookies = "cookies" in account
 
                 # 解析 linux.do 配置（支持 bool、单个账号、多个账号）
@@ -948,6 +1021,13 @@ class AppConfig:
                         print(f"⚠️ {account_name} github configuration is invalid, skipping")
                         continue
 
+                site_accounts = None
+                if has_site:
+                    site_accounts = cls._parse_site_config(account["site"], i)
+                    if site_accounts is None:
+                        print(f"⚠️ {account_name} site configuration is invalid, skipping")
+                        continue
+
                 # 验证 cookies 配置
                 valid_cookies = False
                 if has_cookies:
@@ -964,16 +1044,17 @@ class AppConfig:
                 # 检查解析后是否至少有一个有效的认证方式
                 has_valid_linux_do = linux_do_accounts is not None and len(linux_do_accounts) > 0
                 has_valid_github = github_accounts is not None and len(github_accounts) > 0
+                has_valid_site = site_accounts is not None and len(site_accounts) > 0
                 has_valid_cookies = valid_cookies
 
-                if not has_valid_linux_do and not has_valid_github and not has_valid_cookies:
+                if not has_valid_linux_do and not has_valid_github and not has_valid_site and not has_valid_cookies:
                     print(
-                        f"⚠️ {account_name} must have at least one valid authentication method (linux.do, github, or cookies), skipping"
+                        f"⚠️ {account_name} must have at least one valid authentication method (site, linux.do, github, or cookies), skipping"
                     )
                     continue
 
                 # 创建 AccountConfig，传入解析后的 OAuth 账号列表
-                account_config = AccountConfig.from_dict(account, linux_do_accounts, github_accounts)
+                account_config = AccountConfig.from_dict(account, linux_do_accounts, github_accounts, site_accounts)
                 accounts.append(account_config)
 
             return accounts
