@@ -42,6 +42,8 @@ Affs:
 
 仓库根目录提供了一个纯 HTML 生成器：`secret-json-generator.html`。
 
+在线打开：[Secret JSON Generator](https://acehubert.github.io/newapi-ai-check-in/secret-json-generator.html)
+
 使用方式：
 
 1. 在本地直接双击打开 `secret-json-generator.html`（或拖进浏览器）
