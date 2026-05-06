@@ -138,6 +138,7 @@ Affs:
       "cookies": {
         "session": "account1_session_value"
       },
+      "system_access_token": "sk-xxxxxxxxxxxxxxxx"
       "api_user": "account1_api_user_id",
       "github": {
         "username": "myuser",
@@ -167,13 +168,13 @@ Affs:
     },
     {
       "name": "使用全局账号",
-      "provider": "agentrouter",
+      "provider": "anyrouter",
       "linux.do": true,
       "github": true
     },
     {
       "name": "多个 OAuth 账号",
-      "provider": "wong",
+      "provider": "anyrouter",
       "linux.do": [
         {"username": "user1", "password": "pass1"},
         {"username": "user2", "password": "pass2"}
@@ -188,7 +189,8 @@ Affs:
 - `provider` (可选)：供应商，内置 `anyrouter`、`wong`、`huan666`、`x666`、`kfc`、`elysiver`、`hotaru`默认使用 `anyrouter`
 - `proxy` (可选)：单个账号代理配置，支持 `http`、`socks5` 代理
 - `cookies`(可选)：用于身份验证的 cookies 数据
-- `api_user`(cookies 设置时必需)：用于请求头的 new-api-user 参数
+- `system_access_token`(可选)：系统访问令牌，通过 `Authorization: Bearer <token>` 方式认证签到
+- `api_user`(cookies 或 system_access_token 设置时必需)：用于请求头的 new-api-user 参数
 - `linux.do`(可选)：用于登录身份验证，支持三种格式：
   - `true`：使用 `LINUX_DO_ACCOUNTS` 中的全局账号
   - `{"username": "xxx", "password": "xxx"}`：单个账号
@@ -253,7 +255,24 @@ Affs:
 
 ![获取 api_user](./assets/request-api-user.png)
 
-#### 3.7 `GitHub` 在新设备上登录会有两次验证
+#### 3.7 如何获取 System Access Token
+
+登录 newapi 后台，进入 **个人设置 -> 账户管理 -> 安全设置** 页面，点击 **生成令牌** 复制生成的令牌值。
+
+![获取 System Access Token](./assets/system-access-token.png)
+
+获取到令牌后，在账号配置中设置 `system_access_token` 和 `api_user` 字段即可：
+
+```json
+{
+  "name": "使用系统访问令牌",
+  "provider": "x666",
+  "api_user": "12345",
+  "system_access_token": "sk-xxxxxxxxxxxxxxxx"
+}
+```
+
+#### 3.8 `GitHub` 在新设备上登录会有两次验证
 
 通过打印日志中链接打开并输入验证码。
 
