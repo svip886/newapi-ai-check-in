@@ -12,6 +12,9 @@ from utils.browser_utils import filter_cookies, take_screenshot, save_page_conte
 from utils.config import ProviderConfig
 from utils.wait_for_secrets import WaitForSecrets
 from utils.get_headers import get_browser_headers, print_browser_headers
+from utils.storage_state import ensure_storage_state_from_env
+
+STORAGE_STATE_ENV_NAME = "STORATE_STATES_GITHUB"
 
 
 class GitHubSignIn:
@@ -73,6 +76,13 @@ class GitHubSignIn:
                 "forceScopeAccess": True,
             },
         ) as browser:
+            ensure_storage_state_from_env(
+                cache_file_path,
+                self.account_name,
+                self.username,
+                env_name=STORAGE_STATE_ENV_NAME,
+            )
+
             # 只有在缓存文件存在时才加载 storage_state
             storage_state = cache_file_path if os.path.exists(cache_file_path) else None
             if storage_state:
@@ -312,6 +322,7 @@ class GitHubSignIn:
 
                     # 从 localStorage 获取 user 对象并提取 id
                     api_user = None
+                    current_url = page.url
                     try:
                         try:
                             await page.wait_for_function('localStorage.getItem("user") !== null', timeout=10000)
@@ -357,8 +368,7 @@ class GitHubSignIn:
                     else:
                         print(f"⚠️ {self.account_name}: OAuth callback received but no user ID found")
                         await take_screenshot(page, "github_oauth_failed_no_user_id", self.account_name)
-
-                        parsed_url = urlparse(page.url)
+                        parsed_url = urlparse(current_url)
                         query_params = parse_qs(parsed_url.query)
 
                         # 如果 query 中包含 code，说明 OAuth 回调成功
@@ -378,7 +388,10 @@ class GitHubSignIn:
                                 )
                             return True, query_params, browser_headers
                         else:
-                            print(f"❌ {self.account_name}: OAuth failed, no code in callback")
+                            print(
+                                f"❌ {self.account_name}: OAuth failed, no code in callback\n"
+                                f"Parsed url is: {current_url}"
+                            )
                             return (
                                 False,
                                 {

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from curl_cffi import requests as curl_requests
 
 from utils.http_utils import proxy_resolve, response_resolve
+from utils.get_headers import get_curl_cffi_impersonate
 
 if TYPE_CHECKING:
     from utils.config import AccountConfig, ProviderConfig
@@ -21,7 +22,6 @@ def topup(
     headers: dict,
     cookies: dict,
     key: str,
-    impersonate: str = "firefox135",
 ) -> dict:
     """执行充值请求
 
@@ -31,7 +31,6 @@ def topup(
         headers: 请求头
         cookies: cookies 字典
         key: 充值密钥
-        impersonate: curl_cffi 浏览器指纹模拟，默认为 "firefox135"
 
     Returns:
         包含 success 和 message 或 error 的字典
@@ -49,6 +48,10 @@ def topup(
             "success": False,
             "error": "No topup URL configured",
         }
+    
+    # 根据 User-Agent 自动推断 impersonate 值
+    user_agent = headers.get("User-Agent", "")
+    impersonate = get_curl_cffi_impersonate(user_agent) if user_agent else "firefox135"
     
     session = curl_requests.Session(impersonate=impersonate, proxy=http_proxy, timeout=30)
     try:
